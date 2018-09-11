@@ -1,0 +1,14 @@
+{
+  "username":"alrash",
+  "passwd":"your user password",
+  "ssh_config":{
+    "host":"127.0.0.1",
+    "port":22,
+    "auth":"on / off",
+    "key":"~/.ssh/id_rsa",
+    "passwd":""
+  },
+  "sync":"up / down / sync",
+  "local":"/mnt/e/zotero",
+  "remote":"~/sync"
+}
