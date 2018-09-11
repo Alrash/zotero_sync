@@ -1,0 +1,326 @@
+#! /usr/bin/python
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import json
+import stat
+
+# check paramiko package
+try:
+    import paramiko
+except ImportError:
+    sys.stderr.write('Please install paramiko package, such as `pip install paramiko`!\n')
+    sys.exit(-1)
+
+# check argparse package
+try:
+    import argparse
+except ImportError:
+    sys.stderr.write('Please install argparse package, such as `pip install argparse`!\n')
+    sys.exit(-1)
+
+if sys.platform == 'win32':
+    SEPT = '\\'
+else:
+    SEPT = '/'
+
+CONFIG = {
+        "username": None,
+        "passwd": None,
+        "ssh_config": {
+            "host": None,
+            "port": 22,
+            "auth": 'off',
+            "key": None,
+            "passwd": '',
+            },
+        "local": None,
+        "remote": None,
+        "sync": 'sync'
+        }
+DIR = 'storage'
+
+def parse_args():
+    parser = argparse.ArgumentParser(description = 'Sync zotero storage dirctory.')
+
+    # choice
+    # required = True
+    parser.add_argument('-c', '--config', action = 'store', dest = 'config', help = 'load config file')
+
+    parser.add_argument('-u', '--username', action = 'store', dest = 'username', help = 'set username')
+    parser.add_argument('-w', '--password', action = 'store', dest = 'user_passwd', help = 'username password, if private key isnt useful')
+
+    parser.add_argument('-i', '--host', action = 'store', dest = 'host', help = 'set hostname')
+    parser.add_argument('-p', '--port', action = 'store', dest = 'port', type = int, help = 'set port number, default 22')
+    parser.add_argument('-a', '--auth', action = 'store', dest = 'auth', choices = ["on", "off"], help = 'off - use user password, on - attempt to use private key, and if failed, try to use password')
+    parser.add_argument('-k', '--key', action = 'store', dest = 'key', help = 'set private key path, supported by relpath')
+    parser.add_argument('-W', '--keyword', action = 'store', dest = 'key_passwd', help = 'ssh public key password, default none')
+
+    parser.add_argument('-s', '--sync', action = 'store', dest = 'sync', choices = ["up", "down", "sync"], help = 'up - only upload, down - only download, sync - both')
+
+    parser.add_argument('-l', '--local', action = 'store', dest = 'local', help = 'local zotero repo root dirctory')
+    parser.add_argument('-r', '--remote', action = 'store', dest = 'remote', help = 'remote sync dirctory')
+
+    # version information
+    parser.add_argument('-v', '--version', action = 'version', version = '%(prog)s 0.1')
+
+    return parser.parse_args()
+
+# load default config from file
+def load_config_file(filename):
+    if os.path.isfile(filename):
+        # load config from file
+        try:
+            with open(filename, 'r') as f:
+                config = json.load(f)
+        except:
+            sys.stderr.write("failed to load json config file (%s)\n"%filename)
+            sys.exit(-1)
+
+        # merge default config
+        default = CONFIG
+        default['ssh_config'] = dict(default['ssh_config'], **config['ssh_config'])
+        del config['ssh_config']
+        return dict(default, **config)
+    else:
+        sys.stderr.write("Warning: `%s` not found, using default config settings\n"%filename)
+        return CONFIG
+
+def check_elem_none(elem, info):
+    if elem is None:
+        sys.stderr.write("Error, required [%s]\n"%(info))
+        sys.exit(-1)
+
+def check_elem_choice(elem, info, choices):
+    if not (elem in choices):
+        sys.stderr.write("Error, '%s' invalid choice: '%s' (choose from %s)\n"%(info, elem, choices))
+        sys.exit(-1)
+
+def re_config_elem(args_elem, default_elem):
+    if args_elem is None:
+        return default_elem
+    else:
+        return args_elem
+
+def load_config(args):
+    # load default config, if config file not found
+    if sys.platform == 'win32' or args.config is None:
+        config_path = args.config
+    else:
+        config_path = os.path.expanduser(args.config)
+
+    if config_path is None:
+        config = CONFIG
+    else:
+        config = load_config_file(config_path)
+
+    # merge config between config file with default config and args config
+    config = {
+            "username": re_config_elem(args.username, config["username"]),
+            "passwd": re_config_elem(args.user_passwd, config["passwd"]),
+            "ssh_config": {
+                "host": re_config_elem(args.host, config["ssh_config"]["host"]),
+                "port": re_config_elem(args.port, config["ssh_config"]["port"]),
+                "auth": re_config_elem(args.auth, config["ssh_config"]["auth"]),
+                "key": re_config_elem(args.key, config["ssh_config"]["key"]),
+                "passwd": re_config_elem(args.key_passwd, config["ssh_config"]["passwd"]),
+                },
+            "sync": re_config_elem(args.sync, config["sync"]),
+            "local": re_config_elem(args.local, config["local"]),
+            "remote": re_config_elem(args.remote, config["remote"])
+            }
+
+    # check limit choice
+    check_elem_choice(config['ssh_config']['auth'], 'auth', ['on', 'off'])
+    check_elem_choice(config['sync'], 'sync', ['up', 'down', 'sync'])
+
+    # check required choice
+    check_elem_none(config['username'], '-u USERNAME')
+    # due to DNS, dont check whether ip address is right
+    check_elem_none(config['ssh_config']['host'], '-i HOST')
+
+    check_elem_none(config['local'], '-l LOCAL DIR')
+    check_elem_none(config['remote'], '-r REMOTE DIR')
+
+    config['local'] = config['local'].rstrip(SEPT) + SEPT + DIR
+    config['remote'] = config['remote'].rstrip('/') + '/' + DIR
+
+    # check port number and transfor to digit if string
+    if type(config['ssh_config']['port']) != int and config['ssh_config']['port'].isdigit():
+        config['ssh_config']['port'] = str2int(config['ssh_config']['port'])
+
+    if config['ssh_config']['port'] < 1 or config['ssh_config']['port'] > 65535:
+        sys.stderr.write("Error, port number (%d) not in [1, 65535]\n"%config['ssh_config']['port'])
+        sys.exit(-1)
+
+    # password
+    if config['ssh_config']['auth'] == 'on':
+        # check private key path
+        # if not found, try to use user password choice
+        if config['ssh_config']['key'] is None:
+            if config['passwd'] is None:
+                sys.stderr.write("Error, private key path and user password not set!\n")
+                sys.exit(-1)
+            else:
+                sys.stderr.write("Warning, private key file not set, and then try to use user password!\n")
+                # not found, using password
+                config['ssh_config']['auth'] = 'off'
+        else:
+            # expand ~ relpath
+            config['ssh_config']['key'] = os.path.expanduser(config['ssh_config']['key'])
+            if not os.path.isfile(config['ssh_config']['key']):
+                sys.stderr.write("Warning, private key file (%s) not found, and then try to use user password!\n"%config['ssh_config']['key'])
+                # not found, using password
+                config['ssh_config']['auth'] = 'off'
+    else:
+        check_elem_none(config['passwd'], '-w PASSWORD')
+
+    return config
+
+def ssh_connect(config):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    # connect
+    try:
+        # stderr redirect
+        __conscole__ = sys.stderr
+
+        if sys.platform == 'win32':
+            sys.stderr = open(NUL, 'w')
+        else:
+            sys.stderr = open('/dev/null', 'w')
+
+        if config['ssh_config']['auth'] == 'on':
+            private_key = paramiko.RSAKey.from_private_key_file(config['ssh_config']['key'], password = config['ssh_config']['passwd'])
+            ssh.connect(hostname = config['ssh_config']['host'], port = config['ssh_config']['port'], username = config['username'], pkey = private_key)
+        else:
+            ssh.connect(hostname = config['ssh_config']['host'], port = config['ssh_config']['port'], username = config['username'], password = config['passwd'])
+
+        # redirect stderr to conscole
+        sys.stderr = __conscole__
+    except Exception as e:
+        sys.stderr = __conscole__
+
+        sys.stderr.write("SSH connected error: %s\n"%str(e))
+        sys.exit(-1)
+
+    return ssh
+
+# do remote command
+def ssh_command(config, command):
+    ssh = ssh_connect(config)
+    stdin, stdout, stderr = ssh.exec_command(command)
+
+    out_mesg = stdout.readlines()
+    error_mesg = stderr.read()
+
+    # close connected ssh channel
+    ssh.close()
+
+    return ([mesg.strip('\n') for mesg in out_mesg], str(error_mesg, encoding = 'utf-8'))
+
+def sftp_connect(config):
+    trans = paramiko.Transport((config['ssh_config']['host'], config['ssh_config']['port']))
+
+    if config['ssh_config']['auth'] == 'on':
+        private_key = paramiko.RSAKey.from_private_key_file(config['ssh_config']['key'], password = config['ssh_config']['passwd'])
+        trans.connect(username = config['username'], pkey = private_key)
+    else:
+        trans.connect(username = config['username'], password = config['passwd'])
+
+    sftp = paramiko.SFTPClient.from_transport(trans)
+    return (sftp, trans)
+
+# sftp get dir
+def sftp_get_dir(sftp, down):
+    for dirname in down:
+        lstat = sftp.lstat(dirname)
+        if stat.S_ISDIR(lstat.st_mode):
+            # make local dirctory
+            os.mkdir(dirname)
+            for filename in sftp.listdir(dirname):
+                remote_file = dirname + '/' + filename
+                sftp.get(remote_file, dirname + SEPT + filename)
+                sys.stdout.write("Download finish: %s\n" % remote_file)
+        else:
+            sftp.get(dirname, dirname)
+            sys.stdout.write("Download finish: %s\n" % dirname)
+
+# sftp put dir
+def sftp_put_dir(sftp, up):
+    for dirname in up:
+        if os.path.isdir(dirname):
+            # remote mkdir 
+            sftp.mkdir(dirname)
+            for filename in os.listdir(dirname):
+                local_file = dirname + SEPT + filename
+                sftp.put(local_file, dirname + '/' + filename)
+                sys.stdout.write("Upload finish: %s\n" % local_file)
+        else:
+            sftp.put(dirname, dirname)
+            sys.stdout.write("Upload finish: %s\n" % dirname)
+
+# file sync
+def sftp_sync(config, remote, local):
+    # change local dirctory
+    os.chdir(config['local'])
+
+    up = local - remote
+    down = remote - local
+
+    (sftp, trans) = sftp_connect(config)
+    # change remote dirctory
+    sftp.chdir(config['remote'])
+
+    if up and (config['sync'] == 'sync' or config['sync'] == 'up'):
+        sys.stdout.write("==== be ready to upload file ====\n")
+        sftp_put_dir(sftp, up)
+        sys.stdout.write("==== upload finish====\n\n")
+    if down:
+        sys.stdout.write("==== be ready to download file ====\n")
+        sftp_get_dir(sftp, down)
+        sys.stdout.write("==== download finish====\n")
+
+    # close connect
+    trans.close()
+
+if __name__ == '__main__':
+    config = load_config(parse_args())
+
+    command = "ls %s" % (config['remote'])
+    (remote, mesg) = ssh_command(config, command)
+
+    # remote dir not exist, make
+    if not remote and mesg:
+        sys.stdout.write("Not found remote dir (%s), would create\n" % config['remote'])
+        config['sync'] = 'up'
+
+        command = "mkdir -p %s" % config['remote']
+        (out, err) = ssh_command(config, command)
+        
+        # mkdir error
+        if err:
+            sys.stderr.write("%s\n" % err)
+            sys,exit(-1)
+
+    # support `~` relpath
+    if config['remote'][0] == '~':
+        (home, mesg) = ssh_command(config, 'echo $HOME')
+        if mesg:
+            sys.stdout.write("could not get $HOME in remote server, exit\n")
+            sys.stderr.write("%s\n" % mesg)
+            exit(-1)
+        else:
+            config['remote'] = "%s%s" % (home[0], config['remote'][1:])
+
+    if os.path.isdir(config['local']):
+        local = os.listdir(config['local'])
+        
+        # both of them none, exit 0
+        # else do sync
+        if local or remote:
+            sftp_sync(config, set(remote), set(local))
+    else:
+        sys.stderr.write("not found '%s', please set right local zotero storage dirctory!\n" % config['local'])
