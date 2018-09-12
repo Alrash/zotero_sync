@@ -42,7 +42,7 @@ CONFIG = {
 DIR = 'storage'
 
 def parse_args():
-    parser = argparse.ArgumentParser(description = 'Sync zotero storage dirctory.')
+    parser = argparse.ArgumentParser(description = 'Sync zotero storage directory.')
 
     # choice
     # required = True
@@ -59,8 +59,8 @@ def parse_args():
 
     parser.add_argument('-s', '--sync', action = 'store', dest = 'sync', choices = ["up", "down", "sync"], help = 'up - only upload, down - only download, sync - both')
 
-    parser.add_argument('-l', '--local', action = 'store', dest = 'local', help = 'local zotero repo root dirctory')
-    parser.add_argument('-r', '--remote', action = 'store', dest = 'remote', help = 'remote sync dirctory')
+    parser.add_argument('-l', '--local', action = 'store', dest = 'local', help = 'local zotero repo root directory')
+    parser.add_argument('-r', '--remote', action = 'store', dest = 'remote', help = 'remote sync directory')
 
     # version information
     parser.add_argument('-v', '--version', action = 'version', version = '%(prog)s 0.1')
@@ -238,7 +238,7 @@ def sftp_get_dir(sftp, down):
     for dirname in down:
         lstat = sftp.lstat(dirname)
         if stat.S_ISDIR(lstat.st_mode):
-            # make local dirctory
+            # make local directory
             os.mkdir(dirname)
             for filename in sftp.listdir(dirname):
                 remote_file = dirname + '/' + filename
@@ -264,21 +264,21 @@ def sftp_put_dir(sftp, up):
 
 # file sync
 def sftp_sync(config, remote, local):
-    # change local dirctory
+    # change local directory
     os.chdir(config['local'])
 
     up = local - remote
     down = remote - local
 
     (sftp, trans) = sftp_connect(config)
-    # change remote dirctory
+    # change remote directory
     sftp.chdir(config['remote'])
 
     if up and (config['sync'] == 'sync' or config['sync'] == 'up'):
         sys.stdout.write("==== be ready to upload file ====\n")
         sftp_put_dir(sftp, up)
         sys.stdout.write("==== upload finish====\n\n")
-    if down:
+    if down and (config['sync'] == 'sync' or config['sync'] == 'down'):
         sys.stdout.write("==== be ready to download file ====\n")
         sftp_get_dir(sftp, down)
         sys.stdout.write("==== download finish====\n")
@@ -323,4 +323,4 @@ if __name__ == '__main__':
         if local or remote:
             sftp_sync(config, set(remote), set(local))
     else:
-        sys.stderr.write("not found '%s', please set right local zotero storage dirctory!\n" % config['local'])
+        sys.stderr.write("not found '%s', please set right local zotero storage directory!\n" % config['local'])
